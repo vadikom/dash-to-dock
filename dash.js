@@ -200,6 +200,15 @@ var MyDash = GObject.registerClass({
         this._ensureAppIconVisibilityTimeoutId = 0;
         this._labelShowing = false;
 
+        // Handling dragging of foreign objects over the dock icons
+        this._iconDragActivateTimeoutId = 0;
+        this._lastActiveIcon = null;
+        this._persistentDragMonitor = {
+            dragMotion: this._onDragMotion.bind(this)
+        };
+        DND.addDragMonitor(this._persistentDragMonitor);
+        Main.xdndHandler.connect('drag-end', this._onDragLeave.bind(this));
+
         this._container = new MyDashActor();
         this._scrollView = new St.ScrollView({
             name: 'dashtodockDashScrollview',
@@ -303,6 +312,7 @@ var MyDash = GObject.registerClass({
     }
 
     _onDestroy() {
+        DND.removeDragMonitor(this._persistentDragMonitor);
         this.iconAnimator.destroy();
         this._signalsHandler.destroy();
     }
@@ -323,8 +333,75 @@ var MyDash = GObject.registerClass({
         return Dash.Dash.prototype._endDrag.call(this, ...arguments);
     }
 
-    _onDragMotion() {
-        return Dash.Dash.prototype._onDragMotion.call(this, ...arguments);
+    _onDragMotion(dragEvt) {
+        if (dragEvt.source instanceof AppDisplay.AppIcon) {
+            // The monitor in the original Dash can handle this
+            return DND.DragMotionResult.CONTINUE;
+        }
+
+        this._resetIconDragActivationTimer();
+
+        // Get hovered icon
+        let children = this._box.get_children(),
+            icon = children.find(child => {
+                let target = child.child,
+                    [, x, y] = target.transform_stage_point(dragEvt.x, dragEvt.y);
+                return target.get_allocation_box().contains(x, y);
+            });
+        if (icon) {
+            icon = icon.child;
+            if (this._lastActiveIcon && this._lastActiveIcon != icon) {
+                this._iconDragDeactivate(this._lastActiveIcon);
+            }
+            this._iconDragActivate(icon);
+        }
+        return DND.DragMotionResult.NO_DROP;
+    }
+
+    _onDragLeave() {
+        this._resetIconDragActivationTimer();
+        if (this._lastActiveIcon) {
+            this._iconDragDeactivate(this._lastActiveIcon);
+        }
+    }
+
+    _iconDim(icon) {
+        icon.opacity = 150;
+        icon.set_hover(true);
+    }
+
+    _iconUndim(icon) {
+        icon.opacity = 255;
+        icon.set_hover(false);
+    }
+
+    _iconDragActivate(icon) {
+        if (this._lastActiveIcon != icon) {
+            this._iconDim(icon);
+        }
+        const windows = icon.getInterestingWindows();
+        this._iconDragActivateTimeoutId = GLib.timeout_add(
+            GLib.PRIORITY_DEFAULT, 250, () => {
+            if (windows.length > 0) {
+                icon._activateAllWindows();
+            } else {
+                icon.launchNewWindow();
+            }
+            this._iconDragActivateTimeoutId = 0;
+        });
+        this._lastActiveIcon = icon;
+    }
+
+    _iconDragDeactivate(icon) {
+        this._iconUndim(icon);
+        this._lastActiveIcon = null;
+    }
+
+    _resetIconDragActivationTimer() {
+        if (this._iconDragActivateTimeoutId > 0) {
+            GLib.source_remove(this._iconDragActivateTimeoutId);
+            this._iconDragActivateTimeoutId = 0;
+        }
     }
 
     _appIdListToHash() {
